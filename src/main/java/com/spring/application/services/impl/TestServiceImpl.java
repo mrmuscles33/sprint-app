@@ -1,17 +1,21 @@
 package com.spring.application.services.impl;
 
+import java.util.Optional;
+
+import org.springframework.stereotype.Service;
+
 import com.spring.application.model.Test;
 import com.spring.application.repository.TestRepository;
 import com.spring.application.services.interfaces.TestService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
 
-import java.util.Optional;
+import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
 
 @Service
+@AllArgsConstructor
+@RequiredArgsConstructor
 public class TestServiceImpl implements TestService {
 
-    @Autowired
     TestRepository testRepository;
 
     @Override
