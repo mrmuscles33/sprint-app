@@ -34,3 +34,6 @@ build/
 
 ### JetClient ###
 .jetclient/
+
+### SPRING ###
+/src/main/resources/secure-application.properties

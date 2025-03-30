@@ -22,6 +22,8 @@ public class JWTServiceImpl implements JWTService {
     private String secret;
     @Value("${jwt.expire}")
     private long expire;
+    @Value("${jwt.issuer}")
+    private String issuer;
 
     @Override
     public String createToken(String username) {
@@ -31,6 +33,7 @@ public class JWTServiceImpl implements JWTService {
     @Override
     public String createToken(String username, Map<String, ?> params) {
         return Jwts.builder()
+                .issuer(this.getClass().getCanonicalName())
                 .subject(username)
                 .issuedAt(new Date())
                 .expiration(new Date((new Date()).getTime() + this.expire))
