@@ -12,5 +12,5 @@ public interface JWTService {
 
     Map<String, Object> getParams(String token);
 
-    boolean validateToken(String token);
+    boolean isValid(String token);
 }

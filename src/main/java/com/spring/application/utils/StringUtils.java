@@ -3,6 +3,7 @@ package com.spring.application.utils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Component;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
@@ -11,9 +12,12 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Objects;
 
+@Component
 public class StringUtils {
 
-    public static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    private static final String SPECIAL_CHARS = "àâäéèêëîïôöùûüÿçµ£¤§!@#$%^&*()-°¨_+[]{}|;:',.<>?/~`";
 
     private StringUtils() {
         super();
@@ -22,8 +26,8 @@ public class StringUtils {
     /**
      * Check if a string is empty
      *
-     * @param str
-     * @return
+     * @param str The string to check
+     * @return true if the string is empty or null
      */
     public static boolean isEmpty(Object str) {
         return str == null || StringUtils.toString(str).trim().isEmpty();
@@ -55,8 +59,8 @@ public class StringUtils {
     /**
      * Convert an object to a boolean
      *
-     * @param value
-     * @return
+     * @param value The object to convert
+     * @return The boolean
      */
     public static boolean toBool(Object value) {
         String strValue = toString(value);
@@ -113,8 +117,9 @@ public class StringUtils {
      * @param json The JSON string
      * @return The Map
      */
-    public static Map<String, Object> jsonToMap(String json) throws JsonProcessingException {
-        return OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
+    public static Map<String, ?> jsonToMap(String json) throws JsonProcessingException {
+        return OBJECT_MAPPER.readValue(json, new TypeReference<>() {
+        });
     }
 
     /**
@@ -123,7 +128,33 @@ public class StringUtils {
      * @param map The Map
      * @return The JSON string
      */
-    public static String mapToJson(Map<String, Object> map) throws JsonProcessingException {
+    public static String mapToJson(Map<String, ?> map) throws JsonProcessingException {
         return OBJECT_MAPPER.writeValueAsString(map);
+    }
+
+    /**
+     * Generate a random string of a given size
+     *
+     * @param size The size of the string
+     * @return The random string
+     */
+    public static String random(int size) {
+        return random(size, false);
+    }
+
+    /**
+     * Generate a random string of a given size
+     *
+     * @param size         The size of the string
+     * @param specialChars If true, the string will contain special characters
+     * @return The random string
+     */
+    public static String random(int size, boolean specialChars) {
+        String chars = specialChars ? CHARS + SPECIAL_CHARS : CHARS;
+        StringBuilder sb = new StringBuilder(size);
+        for (int i = 0; i < size; i++) {
+            sb.append(chars.charAt((int) (Math.random() * chars.length())));
+        }
+        return sb.toString();
     }
 }

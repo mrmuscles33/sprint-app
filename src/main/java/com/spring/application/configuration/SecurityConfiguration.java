@@ -1,6 +1,7 @@
 package com.spring.application.configuration;
 
 import com.spring.application.filter.JWTFilter;
+import com.spring.application.interceptor.AuthenticationInterceptor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -9,13 +10,16 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
 @EnableWebSecurity
 @RequiredArgsConstructor
-public class SecurityConfiguration {
+public class SecurityConfiguration implements WebMvcConfigurer {
 
     private final JWTFilter jwtFilter;
+    private final AuthenticationInterceptor authenticationInterceptor;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -26,9 +30,6 @@ public class SecurityConfiguration {
         http.logout(AbstractHttpConfigurer::disable);
         http.cors(AbstractHttpConfigurer::disable);
 
-        // Filters
-        http.addFilterBefore(jwtFilter, BasicAuthenticationFilter.class);
-
         // Authorization
         http.authorizeHttpRequests(authorizeRequests -> authorizeRequests
                 // All requests to /auth are allowed
@@ -37,6 +38,14 @@ public class SecurityConfiguration {
                 .anyRequest().authenticated()
         );
 
+        // Filters
+        http.addFilterBefore(jwtFilter, BasicAuthenticationFilter.class);
+
         return http.build();
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(authenticationInterceptor);
     }
 }

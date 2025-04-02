@@ -1,5 +1,6 @@
 package com.spring.application.controllers;
 
+import com.spring.application.annotations.Authenticated;
 import com.spring.application.annotations.ConditionalProperty;
 import com.spring.application.annotations.LogExecutionTime;
 import com.spring.application.model.Test;
@@ -31,6 +32,7 @@ public class TestController {
     }
 
     @GetMapping("/ping")
+    @Authenticated(roles = {"ROLE_ADMIN"})
     public String ping() {
         return "pong";
     }
