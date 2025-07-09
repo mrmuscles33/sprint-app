@@ -8,9 +8,11 @@ import org.springframework.stereotype.Component;
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.Map;
-import java.util.Objects;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Component
 public class StringUtils {
@@ -156,5 +158,87 @@ public class StringUtils {
             sb.append(chars.charAt((int) (Math.random() * chars.length())));
         }
         return sb.toString();
+    }
+
+    /**
+     * Parse a CSV line into a Map
+     * The keys of the Map are the column names
+     * The values of the Map are the values of the columns
+     * The CSV line is split by the given delimiter (default is ";")
+     * If a value contains the delimiter, it must be escaped with #FAKE_DELIMITER#
+     * The values are converted to the appropriate type:
+     * - Integer if the value is an integer
+     * - Double if the value is a double
+     * - Date if the value is a date in the format "yyyy-MM-dd HH:mm:ss" or "yyyy-MM-dd"
+     * - String otherwise
+     *
+     * @param line    The CSV line to parse
+     * @param columns The list of column names
+     * @return A Map with the column names as keys and the values as values
+     */
+    public static Map<String, Object> parseCSVLine(String line, List<String> columns) {
+        return parseCSVLine(line, columns, ";");
+    }
+
+    /**
+     * Parse a CSV line into a Map
+     * The keys of the Map are the column names
+     * The values of the Map are the values of the columns
+     * The CSV line is split by the given delimiter (default is ";")
+     * If a value contains the delimiter, it must be escaped with #FAKE_DELIMITER#
+     * The values are converted to the appropriate type:
+     * - Integer if the value is an integer
+     * - Double if the value is a double
+     * - Date if the value is a date in the format "yyyy-MM-dd HH:mm:ss" or "yyyy-MM-dd"
+     * - String otherwise
+     *
+     * @param line The CSV line to parse
+     * @param columns The list of column names
+     * @param delimiter The delimiter to use for splitting the line
+     * @return A Map with the column names as keys and the values as values
+     */
+    public static Map<String, Object> parseCSVLine(String line, List<String> columns, String delimiter) {
+        Map<String, Object> row = new HashMap<>();
+        String[] parts = line.split(delimiter, -1);
+        String column;
+        String value;
+        for (int i = 0; i < columns.size(); i++) {
+            value = i < parts.length ? parts[i].trim() : "";
+            column = columns.get(i);
+            if (DateUtils.isDate(value, DateUtils.YMDHMS)) {
+                row.put(column, DateUtils.toDateTime(value, DateUtils.YMDHMS));
+            } else if (DateUtils.isDate(value, DateUtils.YMD)) {
+                row.put(column, DateUtils.toDate(value, DateUtils.YMD));
+            } else if (NumberUtils.isInt(value)) {
+                row.put(column, NumberUtils.toInt(value));
+            } else if (NumberUtils.isDouble(value)) {
+                row.put(column, NumberUtils.toDouble(value));
+            } else {
+                value = value.startsWith("\"") && value.endsWith("\"") ? value.substring(1, value.length() - 1) : value;
+                row.put(column, value.replace("#FAKE_DELIMITER#", delimiter));
+            }
+        }
+        return row;
+    }
+
+    public static String encodeCSVLine(Map<String, Object> row) {
+        return encodeCSVLine(row, ";");
+    }
+
+    public static String encodeCSVLine(Map<String, Object> row, String delimiter) {
+        return row.values().stream()
+                .map(value -> {
+                    if (value instanceof LocalDateTime localDateTime) {
+                        return DateUtils.toString(localDateTime, DateUtils.YMDHMS);
+                    } else if (value instanceof LocalDate localDate) {
+                        return DateUtils.toString(localDate, DateUtils.YMD);
+                    } else if (value instanceof Integer || value instanceof Double) {
+                        return StringUtils.toString(value);
+                    } else {
+                        String strValue = "\"" + StringUtils.toString(value) + "\"";
+                        return strValue.contains(delimiter) ? strValue.replace(delimiter, "#FAKE_DELIMITER#") : strValue;
+                    }
+                })
+                .collect(Collectors.joining(delimiter));
     }
 }
