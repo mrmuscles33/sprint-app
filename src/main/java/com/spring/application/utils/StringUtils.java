@@ -221,11 +221,11 @@ public class StringUtils {
         return row;
     }
 
-    public static String encodeCSVLine(Map<String, Object> row) {
+    public static String encodeCSVLine(LinkedHashMap<String, Object> row) {
         return encodeCSVLine(row, ";");
     }
 
-    public static String encodeCSVLine(Map<String, Object> row, String delimiter) {
+    public static String encodeCSVLine(LinkedHashMap<String, Object> row, String delimiter) {
         return row.values().stream()
                 .map(value -> {
                     if (value instanceof LocalDateTime localDateTime) {
@@ -234,6 +234,8 @@ public class StringUtils {
                         return DateUtils.toString(localDate, DateUtils.YMD);
                     } else if (value instanceof Integer || value instanceof Double) {
                         return StringUtils.toString(value);
+                    } else if (value instanceof Boolean boolValue) {
+                        return boolValue ? "true" : "false";
                     } else {
                         String strValue = "\"" + StringUtils.toString(value) + "\"";
                         return strValue.contains(delimiter) ? strValue.replace(delimiter, "#FAKE_DELIMITER#") : strValue;

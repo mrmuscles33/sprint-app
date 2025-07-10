@@ -1,6 +1,7 @@
 package com.spring.application;
 
 import com.spring.application.annotations.LogExecutionTime;
+import com.spring.application.model.Test;
 import com.spring.application.utils.DateUtils;
 import com.spring.application.utils.LocalDatabase;
 import lombok.RequiredArgsConstructor;
@@ -10,8 +11,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 @SpringBootApplication
 @RequiredArgsConstructor
@@ -28,17 +29,24 @@ public class MainApp implements CommandLineRunner {
 	@LogExecutionTime
 	public void run(String... args) {
         try {
-			if(!localDatabase.exists("TEST")) {
-				localDatabase.create("TEST", List.of("ID", "NAME", "AGE"));
+			if(!localDatabase.exists(Test.class)) {
+				localDatabase.create(Test.class);
 			}
-			List<Map<String, Object>> result = localDatabase.query(
-					"TEST",
-					List.of("ID", "NAME", "AGE"),
-					row -> row.get("ID") != null && row.get("ID") instanceof Integer id && id == 1
-			);
-			if(result.isEmpty()) {
-				localDatabase.insert("TEST", Map.of("ID", 1, "NAME", "John Doe", "AGE", DateUtils.now()));
-			}
+
+//			List<Test> testList = new ArrayList<>();
+//			for (int i = 1; i <= 10000; i++) {
+//				Test test = new Test();
+//				test.setId(i);
+//				test.setNom("Nom " + i);
+//				test.setNaissance(DateUtils.now());
+//				test.setActive(i % 2 == 0);
+//				testList.add(test);
+//			}
+//
+//			localDatabase.insert(testList);
+
+			List<Test> tests = localDatabase.query(Test.class, test -> test.getId() == 1);
+			log.info("Tests found: {}", tests.size());
         } catch (IOException e) {
             log.error(e.getMessage());
         }

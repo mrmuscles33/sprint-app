@@ -1,16 +1,30 @@
 package com.spring.application.utils;
 
+import jakarta.persistence.Column;
+import jakarta.persistence.Table;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.*;
-import java.util.function.Function;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Service
 @RequiredArgsConstructor
@@ -23,10 +37,13 @@ public class LocalDatabase {
         this.databaseFolder = databaseFolder;
     }
 
-    public void create(String tableName, List<String> columns) throws IOException {
+    public <T> void create(Class<T> entity) throws IOException {
+        String tableName = getTableName(entity);
+        List<String> columns = getColumns(entity);
+
         validateDatabaseFolder();
         validateTableName(tableName);
-        if (columns == null || columns.isEmpty()) {
+        if (columns.isEmpty()) {
             throw new IllegalArgumentException("Columns cannot be null or empty");
         }
 
@@ -41,37 +58,60 @@ public class LocalDatabase {
         }
     }
 
-    public List<Map<String, Object>> query(String tableName, List<String> columns, Predicate<Map<String, Object>> where) throws IOException {
+    public <T> List<T> query(Class<T> entity) throws IOException {
+        return query(entity, null);
+    }
+
+    public <T> List<T> query(Class<T> entity, Predicate<T> where) throws IOException {
+        String tableName = getTableName(entity);
+
         validateDatabaseFolder();
         validateTable(tableName);
 
         Path filePath = getTablePath(tableName);
-        try (BufferedReader reader = Files.newBufferedReader(filePath, StandardCharsets.UTF_8)) {
-            String headerLine = reader.readLine();
-            if (headerLine == null) {
-                return List.of();
-            }
+        String headerLine;
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, true)) {
+                ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
+                channel.read(buffer);
+                buffer.flip();
 
-            List<String> header = List.of(headerLine.split(";"));
-            return reader.lines()
-                    .map(line -> StringUtils.parseCSVLine(line, header, ";"))
-                    .filter(row -> where == null || where.test(row))
-                    .map(row -> filterColumns(row, columns == null || columns.isEmpty() ? header : columns))
-                    .collect(Collectors.toList());
+                String content = StandardCharsets.UTF_8.decode(buffer).toString();
+                List<String> lines = Arrays.asList(content.split(System.lineSeparator()));
+
+                if (lines.isEmpty()) {
+                    return List.of();
+                }
+
+                headerLine = lines.get(0);
+                if (StringUtils.isEmpty(headerLine)) {
+                    return List.of();
+                }
+
+                List<String> header = List.of(headerLine.split(";"));
+                return lines.stream()
+                        .skip(1)
+                        .parallel()
+                        .map(line -> StringUtils.parseCSVLine(line, header, ";"))
+                        .map(map -> ObjectUtils.mapToObject(map, entity))
+                        .filter(obj -> where == null || where.test(obj))
+                        .collect(Collectors.toList());
+            }
         }
     }
 
-    public void insert(String tableName, Map<String, Object> row) throws IOException {
-        insert(tableName, List.of(row));
+    public <T> void insert(T entity) throws IOException {
+        insert(List.of(entity));
     }
 
-    public void insert(String tableName, List<Map<String, Object>> rows) throws IOException {
-        validateDatabaseFolder();
-        validateTable(tableName);
-
-        if (rows == null || rows.isEmpty()) {
+    public <T> void insert(List<T> entities) throws IOException {
+        if (entities == null || entities.isEmpty()) {
             return;
         }
+        String tableName = getTableName(entities.getFirst());
+
+        validateDatabaseFolder();
+        validateTable(tableName);
 
         Path filePath = getTablePath(tableName);
         List<String> header;
@@ -79,21 +119,57 @@ public class LocalDatabase {
             header = List.of(reader.readLine().split(";"));
         }
 
-//        List<String> lines = rows.parallelStream()
-//                .map(row -> {
-//                    Map<String, Object> toWrite = header.stream().collect(Collectors.toMap(Function.identity(), row::get));
-//                    return StringUtils.encodeCSVLine(toWrite, ";");
-//                })
-//                .toList();
+        List<String> lines = entities.stream().parallel().map(entity -> {
+            LinkedHashMap<String, Object> toWrite = new LinkedHashMap<>();
+            for (String col : header) {
+                try {
+                    toWrite.put(col, getValue(entity, col));
+                } catch (IllegalAccessException e) {
+                    throw new RuntimeException("Error accessing field: " + col + " in entity " + entity.getClass().getName(), e);
+                }
+            }
+            return StringUtils.encodeCSVLine(toWrite, ";");
+        }).toList();
 
-        try (BufferedWriter writer = Files.newBufferedWriter(filePath, StandardCharsets.UTF_8, StandardOpenOption.APPEND)) {
-            for (Map<String, Object> row : rows) {
-                Map<String, Object> toWrite = header.stream().collect(Collectors.toMap(Function.identity(), row::get));
-                String line = StringUtils.encodeCSVLine(toWrite, ";");
-                writer.write(line);
-                writer.newLine();
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
+            long position = channel.size();
+            try (FileLock ignored = channel.lock(position, Long.MAX_VALUE - position, false)) {
+                channel.position(position);
+                channel.write(StandardCharsets.UTF_8.encode(String.join(System.lineSeparator(), lines) + System.lineSeparator()));
             }
         }
+    }
+
+    private static <T> Object getValue(T entity, String col) throws IllegalAccessException {
+        Field field = Stream.of(entity.getClass().getDeclaredFields())
+                .filter(f -> f.isAnnotationPresent(Column.class) && f.getAnnotation(Column.class).name().equals(col))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Column " + col + " not found in entity " + entity.getClass().getName()));
+        field.setAccessible(true);
+        return field.get(entity);
+    }
+
+    private static List<String> getColumns(Object entity) {
+        return getColumns(entity.getClass());
+    }
+
+    private static <T> List<String> getColumns(Class<T> entity) {
+        return Arrays.stream(entity.getDeclaredFields())
+                .filter(field -> field.isAnnotationPresent(Column.class))
+                .map(field -> field.getAnnotation(Column.class).name())
+                .collect(Collectors.toList());
+    }
+
+    private static String getTableName(Object entity) {
+        return getTableName(entity.getClass());
+    }
+
+    private static <T> String getTableName(Class<T> entity) {
+        Table tableAnnotation = entity.getAnnotation(Table.class);
+        if (tableAnnotation == null || tableAnnotation.name().isEmpty()) {
+            throw new IllegalArgumentException("Entity class must have a @Table annotation with a valid name");
+        }
+        return tableAnnotation.name();
     }
 
     private Path getTablePath(String tableName) {
@@ -118,15 +194,14 @@ public class LocalDatabase {
         }
     }
 
+    public <T> boolean exists(Class<T> entity) throws IOException {
+        return exists(getTableName(entity));
+    }
+
     public boolean exists(String tableName) throws IOException {
         validateDatabaseFolder();
         validateTableName(tableName);
         return Files.exists(getTablePath(tableName));
     }
 
-    private Map<String, Object> filterColumns(Map<String, Object> row, List<String> columns) {
-        return row.entrySet().stream()
-                .filter(entry -> columns.contains(entry.getKey()))
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-    }
 }
