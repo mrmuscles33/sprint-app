@@ -1,6 +1,7 @@
 package com.spring.application.utils;
 
 import jakarta.persistence.Column;
+import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,10 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.List;
+import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -63,41 +61,37 @@ public class LocalDatabase {
     }
 
     public <T> List<T> query(Class<T> entity, Predicate<T> where) throws IOException {
+        return query(entity, where, null);
+    }
+
+    public <T> List<T> query(Class<T> entity, Predicate<T> where, Comparator<T> order) throws IOException {
         String tableName = getTableName(entity);
 
         validateDatabaseFolder();
         validateTable(tableName);
 
         Path filePath = getTablePath(tableName);
-        String headerLine;
-        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
-            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, true)) {
-                ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
-                channel.read(buffer);
-                buffer.flip();
+        List<String> lines = getLines(filePath);
+        if (lines.isEmpty()) return List.of();
 
-                String content = StandardCharsets.UTF_8.decode(buffer).toString();
-                List<String> lines = Arrays.asList(content.split(System.lineSeparator()));
-
-                if (lines.isEmpty()) {
-                    return List.of();
-                }
-
-                headerLine = lines.get(0);
-                if (StringUtils.isEmpty(headerLine)) {
-                    return List.of();
-                }
-
-                List<String> header = List.of(headerLine.split(";"));
-                return lines.stream()
-                        .skip(1)
-                        .parallel()
-                        .map(line -> StringUtils.parseCSVLine(line, header, ";"))
-                        .map(map -> ObjectUtils.mapToObject(map, entity))
-                        .filter(obj -> where == null || where.test(obj))
-                        .collect(Collectors.toList());
-            }
+        String headerLine = lines.getFirst();
+        if (StringUtils.isEmpty(headerLine)) {
+            return List.of();
         }
+
+        List<String> header = List.of(headerLine.split(";"));
+        return lines.stream()
+                .parallel()
+                .skip(1)
+                .map(line -> StringUtils.parseCSVLine(line, header, ";"))
+                .map(map -> ObjectUtils.mapToObject(map, entity))
+                .filter(obj -> where == null || where.test(obj))
+                .sorted((a, b) -> {
+                    if (order == null) {
+                        return 0;
+                    }
+                    return order.compare(a, b);
+                }).collect(Collectors.toList());
     }
 
     public <T> void insert(T entity) throws IOException {
@@ -108,7 +102,8 @@ public class LocalDatabase {
         if (entities == null || entities.isEmpty()) {
             return;
         }
-        String tableName = getTableName(entities.getFirst());
+        T first = entities.getFirst();
+        String tableName = getTableName(first);
 
         validateDatabaseFolder();
         validateTable(tableName);
@@ -119,34 +114,73 @@ public class LocalDatabase {
             header = List.of(reader.readLine().split(";"));
         }
 
-        List<String> lines = entities.stream().parallel().map(entity -> {
-            LinkedHashMap<String, Object> toWrite = new LinkedHashMap<>();
-            for (String col : header) {
-                try {
-                    toWrite.put(col, getValue(entity, col));
-                } catch (IllegalAccessException e) {
-                    throw new RuntimeException("Error accessing field: " + col + " in entity " + entity.getClass().getName(), e);
-                }
-            }
-            return StringUtils.encodeCSVLine(toWrite, ";");
-        }).toList();
+        // Check unity constraint based on ID columns
+        List<String> idColumns = getIdColumns(first.getClass());
+        List<T> existingLines = idColumns.isEmpty() ? List.of() : safeCastList(query(first.getClass(), null));
+        Set<String> existingIdValues = existingLines.stream().map(entity -> getHashId(entity, idColumns)).collect(Collectors.toSet());
+        List<String> linesToInsert = entities.stream().parallel()
+                .filter(entity -> {
+                    // Ignore entities that already exist
+                    return idColumns.isEmpty() || !existingIdValues.contains(getHashId(entity, idColumns));
+                }).map(entity -> {
+                    // Transform entity to CSV line
+                    LinkedHashMap<String, Object> toWrite;
+                    toWrite = new LinkedHashMap<>();
+                    for (String col : header) {
+                        toWrite.put(col, getValue(entity, col));
+                    }
+                    return StringUtils.encodeCSVLine(toWrite, ";");
+                }).toList();
+
+        if (linesToInsert.isEmpty()) return;
 
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
             long position = channel.size();
             try (FileLock ignored = channel.lock(position, Long.MAX_VALUE - position, false)) {
                 channel.position(position);
-                channel.write(StandardCharsets.UTF_8.encode(String.join(System.lineSeparator(), lines) + System.lineSeparator()));
+                channel.write(StandardCharsets.UTF_8.encode(String.join(System.lineSeparator(), linesToInsert) + System.lineSeparator()));
             }
         }
     }
 
-    private static <T> Object getValue(T entity, String col) throws IllegalAccessException {
+    @SuppressWarnings("unchecked")
+    private static <T> List<T> safeCastList(List<?> list) {
+        return (List<T>) list;
+    }
+
+    private static List<String> getLines(Path filePath) throws IOException {
+        List<String> lines;
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, true)) {
+                ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
+                channel.read(buffer);
+                buffer.flip();
+
+                String content = StandardCharsets.UTF_8.decode(buffer).toString();
+                lines = Arrays.asList(content.split(System.lineSeparator()));
+
+            }
+        }
+        return lines;
+    }
+
+    private static <T> String getHashId(T entity, List<String> idColumns) {
+        return idColumns.stream()
+                .map(col -> Objects.requireNonNullElse(getValue(entity, col), "").toString())
+                .collect(Collectors.joining(";"));
+    }
+
+    private static <T> Object getValue(T entity, String col) {
         Field field = Stream.of(entity.getClass().getDeclaredFields())
-                .filter(f -> f.isAnnotationPresent(Column.class) && f.getAnnotation(Column.class).name().equals(col))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Column " + col + " not found in entity " + entity.getClass().getName()));
+                .filter(f -> f.isAnnotationPresent(Column.class) && f.getAnnotation(Column.class).name().equals(col)).findFirst()
+                .orElse(null);
+        if (field == null) return null;
         field.setAccessible(true);
-        return field.get(entity);
+        try {
+            return field.get(entity);
+        } catch (IllegalAccessException e) {
+            return null;
+        }
     }
 
     private static List<String> getColumns(Object entity) {
@@ -156,6 +190,13 @@ public class LocalDatabase {
     private static <T> List<String> getColumns(Class<T> entity) {
         return Arrays.stream(entity.getDeclaredFields())
                 .filter(field -> field.isAnnotationPresent(Column.class))
+                .map(field -> field.getAnnotation(Column.class).name())
+                .collect(Collectors.toList());
+    }
+
+    private static <T> List<String> getIdColumns(Class<T> entity) {
+        return Arrays.stream(entity.getDeclaredFields())
+                .filter(field -> field.isAnnotationPresent(Column.class) && field.isAnnotationPresent(Id.class))
                 .map(field -> field.getAnnotation(Column.class).name())
                 .collect(Collectors.toList());
     }

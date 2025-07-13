@@ -12,7 +12,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Component
 public class StringUtils {
@@ -192,8 +191,8 @@ public class StringUtils {
      * - Date if the value is a date in the format "yyyy-MM-dd HH:mm:ss" or "yyyy-MM-dd"
      * - String otherwise
      *
-     * @param line The CSV line to parse
-     * @param columns The list of column names
+     * @param line      The CSV line to parse
+     * @param columns   The list of column names
      * @param delimiter The delimiter to use for splitting the line
      * @return A Map with the column names as keys and the values as values
      */
@@ -221,10 +220,37 @@ public class StringUtils {
         return row;
     }
 
+    /**
+     * Encode a Map as a CSV line
+     * The values are converted to the appropriate format:
+     * - LocalDateTime is formatted as "yyyy-MM-dd HH:mm:ss"
+     * - LocalDate is formatted as "yyyy-MM-dd"
+     * - Integer and Double are converted to string
+     * - Boolean is converted to "true" or "false"
+     * - Other values are enclosed in quotes and escaped if they contain the delimiter
+     * The CSV line is joined with ";"
+     *
+     * @param row The Map to encode
+     * @return The CSV line as a string
+     */
     public static String encodeCSVLine(LinkedHashMap<String, Object> row) {
         return encodeCSVLine(row, ";");
     }
 
+    /**
+     * Encode a Map as a CSV line
+     * The values are converted to the appropriate format:
+     * - LocalDateTime is formatted as "yyyy-MM-dd HH:mm:ss"
+     * - LocalDate is formatted as "yyyy-MM-dd"
+     * - Integer and Double are converted to string
+     * - Boolean is converted to "true" or "false"
+     * - Other values are enclosed in quotes and escaped if they contain the delimiter
+     * The CSV line is joined with the given delimiter (default is ";")
+     *
+     * @param row       The Map to encode
+     * @param delimiter The delimiter to use for joining the values
+     * @return The CSV line as a string
+     */
     public static String encodeCSVLine(LinkedHashMap<String, Object> row, String delimiter) {
         return row.values().stream()
                 .map(value -> {
