@@ -2,6 +2,7 @@ package com.spring.application.utils;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Id;
+import jakarta.persistence.NonUniqueResultException;
 import jakarta.persistence.Table;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -71,20 +72,11 @@ public class LocalDatabase {
         validateTable(tableName);
 
         Path filePath = getTablePath(tableName);
-        List<String> lines = getLines(filePath);
+        List<T> lines = getLines(filePath, entity);
         if (lines.isEmpty()) return List.of();
 
-        String headerLine = lines.getFirst();
-        if (StringUtils.isEmpty(headerLine)) {
-            return List.of();
-        }
-
-        List<String> header = List.of(headerLine.split(";"));
         return lines.stream()
                 .parallel()
-                .skip(1)
-                .map(line -> StringUtils.parseCSVLine(line, header, ";"))
-                .map(map -> ObjectUtils.mapToObject(map, entity))
                 .filter(obj -> where == null || where.test(obj))
                 .sorted((a, b) -> {
                     if (order == null) {
@@ -108,32 +100,29 @@ public class LocalDatabase {
         validateDatabaseFolder();
         validateTable(tableName);
 
-        Path filePath = getTablePath(tableName);
-        List<String> header;
-        try (BufferedReader reader = Files.newBufferedReader(filePath, StandardCharsets.UTF_8)) {
-            header = List.of(reader.readLine().split(";"));
-        }
-
         // Check unity constraint based on ID columns
         List<String> idColumns = getIdColumns(first.getClass());
-        List<T> existingLines = idColumns.isEmpty() ? List.of() : safeCastList(query(first.getClass(), null));
-        Set<String> existingIdValues = existingLines.stream().map(entity -> getHashId(entity, idColumns)).collect(Collectors.toSet());
-        List<String> linesToInsert = entities.stream().parallel()
-                .filter(entity -> {
-                    // Ignore entities that already exist
-                    return idColumns.isEmpty() || !existingIdValues.contains(getHashId(entity, idColumns));
-                }).map(entity -> {
-                    // Transform entity to CSV line
-                    LinkedHashMap<String, Object> toWrite;
-                    toWrite = new LinkedHashMap<>();
-                    for (String col : header) {
-                        toWrite.put(col, getValue(entity, col));
-                    }
-                    return StringUtils.encodeCSVLine(toWrite, ";");
-                }).toList();
+        if(!idColumns.isEmpty()) {
+            Set<String> existingIdValues = query(first.getClass(), null).stream().map(entity -> getHashId(entity, idColumns)).collect(Collectors.toSet());
+            List<String> idToInsert = entities.stream().map(entity -> getHashId(entity, idColumns)).toList();
+            if (idToInsert.stream().distinct().count() != idToInsert.size() || existingIdValues.stream().anyMatch(idToInsert::contains)) {
+                throw new NonUniqueResultException("Some entities already exist in the table " + tableName + " and were not inserted.");
+            }
+        }
 
-        if (linesToInsert.isEmpty()) return;
+        // Transform entity to CSV line
+        Path filePath = getTablePath(tableName);
+        List<String> header = getHeader(filePath);
+        List<String> linesToInsert = entities.stream().map(entity -> {
+            LinkedHashMap<String, Object> toWrite;
+            toWrite = new LinkedHashMap<>();
+            for (String col : header) {
+                toWrite.put(col, getValue(entity, col));
+            }
+            return StringUtils.encodeCSVLine(toWrite, ";");
+        }).toList();
 
+        // Write lines into table
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
             long position = channel.size();
             try (FileLock ignored = channel.lock(position, Long.MAX_VALUE - position, false)) {
@@ -143,12 +132,48 @@ public class LocalDatabase {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static <T> List<T> safeCastList(List<?> list) {
-        return (List<T>) list;
+    public <T> void delete(Class<T> entity, Predicate<T> where) throws IOException {
+        String tableName = getTableName(entity);
+
+        validateDatabaseFolder();
+        validateTable(tableName);
+
+        Path filePath = getTablePath(tableName);
+        List<T> lines = getLines(filePath, entity);
+
+        // If no lines, nothing to delete
+        if (lines.isEmpty()) return;
+
+        List<T> linesToKeep = lines.stream().parallel().filter(obj -> where != null && !where.test(obj)).toList();
+
+        // No lines to delete
+        if (linesToKeep.size() == lines.size()) {
+            return;
+        }
+
+        // Truncate the file except the header
+        List<String> header = getHeader(filePath);
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE)) {
+            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, false)) {
+                channel.truncate(0);
+                channel.position(0);
+                channel.write(StandardCharsets.UTF_8.encode(String.join(";", header) + System.lineSeparator()));
+            }
+        }
+
+        // Write remaining lines
+        insert(linesToKeep);
     }
 
-    private static List<String> getLines(Path filePath) throws IOException {
+    private static List<String> getHeader(Path filePath) throws IOException {
+        List<String> header;
+        try (BufferedReader reader = Files.newBufferedReader(filePath, StandardCharsets.UTF_8)) {
+            header = List.of(reader.readLine().split(";"));
+        }
+        return header;
+    }
+
+    private static <T> List<T> getLines(Path filePath, Class<T> entity) throws IOException {
         List<String> lines;
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, true)) {
@@ -161,7 +186,16 @@ public class LocalDatabase {
 
             }
         }
-        return lines;
+
+        if(lines.isEmpty()) return List.of();
+
+        List<String> header = List.of(lines.getFirst().split(";"));
+        return lines.stream()
+                .parallel()
+                .skip(1)
+                .map(line -> StringUtils.parseCSVLine(line, header, ";"))
+                .map(map -> ObjectUtils.mapToObject(map, entity))
+                .toList();
     }
 
     private static <T> String getHashId(T entity, List<String> idColumns) {

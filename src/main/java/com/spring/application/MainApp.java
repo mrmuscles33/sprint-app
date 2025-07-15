@@ -35,6 +35,8 @@ public class MainApp implements CommandLineRunner {
                 localDatabase.create(Test.class);
             }
 
+            localDatabase.delete(Test.class, test -> true);
+
 			List<Test> testList = new ArrayList<>();
 			for (int i = 1; i <= 10000; i++) {
 				Test test = new Test();
