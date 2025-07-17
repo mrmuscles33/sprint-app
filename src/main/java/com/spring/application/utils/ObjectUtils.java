@@ -11,7 +11,7 @@ public class ObjectUtils {
 
     public static <T> T mapToObject(Map<String, Object> map, Class<T> clazz) {
         if (map == null || clazz == null) {
-            throw new IllegalArgumentException("La map et la classe ne peuvent pas être nulles");
+            throw new IllegalArgumentException("Map and Class must not be null");
         }
         try {
             T instance = clazz.getDeclaredConstructor().newInstance();

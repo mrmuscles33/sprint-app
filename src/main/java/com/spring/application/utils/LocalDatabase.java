@@ -12,15 +12,16 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -31,6 +32,7 @@ public class LocalDatabase {
 
     @Value("${spring.datasource.url}")
     private String databaseFolder;
+    private static final ConcurrentHashMap<String, ReadWriteLock> tableLocks = new ConcurrentHashMap<>();
 
     public LocalDatabase(String databaseFolder) {
         this.databaseFolder = databaseFolder;
@@ -71,19 +73,27 @@ public class LocalDatabase {
         validateDatabaseFolder();
         validateTable(tableName);
 
-        Path filePath = getTablePath(tableName);
-        List<T> lines = getLines(filePath, entity);
-        if (lines.isEmpty()) return List.of();
+        ReadWriteLock lock = tableLocks.computeIfAbsent(tableName, k -> new ReentrantReadWriteLock());
+        lock.readLock().lock();
+        List<T> result = new ArrayList<>();
+        try {
+            Path filePath = getTablePath(tableName);
+            List<T> lines = getLines(filePath, entity);
+            if (lines.isEmpty()) return List.of();
 
-        return lines.stream()
-                .parallel()
-                .filter(obj -> where == null || where.test(obj))
-                .sorted((a, b) -> {
-                    if (order == null) {
-                        return 0;
-                    }
-                    return order.compare(a, b);
-                }).collect(Collectors.toList());
+            result = lines.stream()
+                    .parallel()
+                    .filter(obj -> where == null || where.test(obj))
+                    .sorted((a, b) -> {
+                        if (order == null) {
+                            return 0;
+                        }
+                        return order.compare(a, b);
+                    }).collect(Collectors.toList());
+        } finally {
+            lock.readLock().unlock();
+        }
+        return result;
     }
 
     public <T> void insert(T entity) throws IOException {
@@ -100,36 +110,59 @@ public class LocalDatabase {
         validateDatabaseFolder();
         validateTable(tableName);
 
-        // Check unity constraint based on ID columns
+        ReadWriteLock lock = tableLocks.computeIfAbsent(tableName, k -> new ReentrantReadWriteLock());
+        lock.writeLock().lock();
+        try {
+            // Check unity constraint based on ID columns
+            List<String> idColumns = getIdColumns(first.getClass());
+            if (!idColumns.isEmpty()) {
+                Set<String> existingIdValues = query(first.getClass(), null).stream().map(entity -> getHashId(entity, idColumns)).collect(Collectors.toSet());
+                List<String> idToInsert = entities.stream().map(entity -> getHashId(entity, idColumns)).toList();
+                if (idToInsert.stream().distinct().count() != idToInsert.size() || existingIdValues.stream().anyMatch(idToInsert::contains)) {
+                    throw new NonUniqueResultException("Some entities already exist in the table " + tableName + " and were not inserted.");
+                }
+            }
+
+            // Transform entity to CSV line
+            Path filePath = getTablePath(tableName);
+            List<String> header = getHeader(filePath);
+            List<String> linesToInsert = entities.stream().map(entity -> {
+                LinkedHashMap<String, Object> toWrite;
+                toWrite = new LinkedHashMap<>();
+                for (String col : header) {
+                    toWrite.put(col, getValue(entity, col));
+                }
+                return StringUtils.encodeCSVLine(toWrite, ";");
+            }).toList();
+
+            // Write lines into table
+            Files.write(filePath, linesToInsert, StandardCharsets.UTF_8, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public <T> void delete(T entity) throws IOException {
+        delete(List.of(entity));
+    }
+
+    public <T> void delete(List<T> entities) throws IOException {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+        T first = entities.getFirst();
         List<String> idColumns = getIdColumns(first.getClass());
-        if(!idColumns.isEmpty()) {
-            Set<String> existingIdValues = query(first.getClass(), null).stream().map(entity -> getHashId(entity, idColumns)).collect(Collectors.toSet());
-            List<String> idToInsert = entities.stream().map(entity -> getHashId(entity, idColumns)).toList();
-            if (idToInsert.stream().distinct().count() != idToInsert.size() || existingIdValues.stream().anyMatch(idToInsert::contains)) {
-                throw new NonUniqueResultException("Some entities already exist in the table " + tableName + " and were not inserted.");
+        List<String> hashIds = idColumns.isEmpty() ? List.of() :
+                entities.stream()
+                        .map(entity -> getHashId(entity, idColumns))
+                        .distinct()
+                        .toList();
+        delete(first.getClass(), obj -> {
+            if (idColumns.isEmpty()) {
+                return entities.stream().anyMatch(e -> e.equals(obj));
             }
-        }
-
-        // Transform entity to CSV line
-        Path filePath = getTablePath(tableName);
-        List<String> header = getHeader(filePath);
-        List<String> linesToInsert = entities.stream().map(entity -> {
-            LinkedHashMap<String, Object> toWrite;
-            toWrite = new LinkedHashMap<>();
-            for (String col : header) {
-                toWrite.put(col, getValue(entity, col));
-            }
-            return StringUtils.encodeCSVLine(toWrite, ";");
-        }).toList();
-
-        // Write lines into table
-        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
-            long position = channel.size();
-            try (FileLock ignored = channel.lock(position, Long.MAX_VALUE - position, false)) {
-                channel.position(position);
-                channel.write(StandardCharsets.UTF_8.encode(String.join(System.lineSeparator(), linesToInsert) + System.lineSeparator()));
-            }
-        }
+            return hashIds.contains(getHashId(obj, idColumns));
+        });
     }
 
     public <T> void delete(Class<T> entity, Predicate<T> where) throws IOException {
@@ -138,31 +171,75 @@ public class LocalDatabase {
         validateDatabaseFolder();
         validateTable(tableName);
 
-        Path filePath = getTablePath(tableName);
-        List<T> lines = getLines(filePath, entity);
+        ReadWriteLock lock = tableLocks.computeIfAbsent(tableName, k -> new ReentrantReadWriteLock());
+        lock.writeLock().lock();
+        try {
+            Path filePath = getTablePath(tableName);
+            List<T> lines = getLines(filePath, entity);
 
-        // If no lines, nothing to delete
-        if (lines.isEmpty()) return;
+            // If no lines, nothing to delete
+            if (lines.isEmpty()) return;
 
-        List<T> linesToKeep = lines.stream().parallel().filter(obj -> where != null && !where.test(obj)).toList();
+            List<T> linesToKeep = where == null ? List.of() : lines.stream().parallel().filter(obj -> !where.test(obj)).toList();
 
-        // No lines to delete
-        if (linesToKeep.size() == lines.size()) {
+            // No lines to delete
+            if (linesToKeep.size() == lines.size()) {
+                return;
+            }
+
+            // Truncate the file except the header
+            List<String> header = getHeader(filePath);
+            Files.write(filePath, List.of(String.join(";", header)), StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
+
+            // Write remaining lines
+            insert(linesToKeep);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public <T> void update(T entity) throws IOException {
+        update(List.of(entity));
+    }
+
+    public <T> void update(T entity, Predicate<T> where) throws IOException {
+        update(List.of(entity), where);
+    }
+
+    public <T> void update(List<T> entities) throws IOException {
+        if (entities == null || entities.isEmpty()) {
             return;
         }
-
-        // Truncate the file except the header
-        List<String> header = getHeader(filePath);
-        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.WRITE)) {
-            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, false)) {
-                channel.truncate(0);
-                channel.position(0);
-                channel.write(StandardCharsets.UTF_8.encode(String.join(";", header) + System.lineSeparator()));
-            }
+        T first = entities.getFirst();
+        List<String> idColumns = getIdColumns(first.getClass());
+        if (idColumns.isEmpty()) {
+            throw new IllegalArgumentException("Entity must have at least one ID column to perform an update");
         }
+        ReadWriteLock lock = tableLocks.computeIfAbsent(getTableName(first), k -> new ReentrantReadWriteLock());
+        lock.writeLock().lock();
+        try {
+            delete(entities);
+            insert(entities);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
 
-        // Write remaining lines
-        insert(linesToKeep);
+    public <T> void update(List<T> entities, Predicate<T> where) throws IOException {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+        delete(safeCast(entities.getFirst().getClass()), where);
+        insert(entities);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> Class<T> safeCast(Class<?> clazz) {
+        try {
+            return (Class<T>) clazz;
+        } catch (ClassCastException e) {
+            throw new IllegalArgumentException("Invalid class type provided: " + clazz.getName(), e);
+        }
     }
 
     private static List<String> getHeader(Path filePath) throws IOException {
@@ -174,20 +251,10 @@ public class LocalDatabase {
     }
 
     private static <T> List<T> getLines(Path filePath, Class<T> entity) throws IOException {
-        List<String> lines;
-        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
-            try (FileLock ignored = channel.lock(0, Long.MAX_VALUE, true)) {
-                ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
-                channel.read(buffer);
-                buffer.flip();
+        String tableName = getTableName(entity);
+        List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
 
-                String content = StandardCharsets.UTF_8.decode(buffer).toString();
-                lines = Arrays.asList(content.split(System.lineSeparator()));
-
-            }
-        }
-
-        if(lines.isEmpty()) return List.of();
+        if (lines.isEmpty()) return List.of();
 
         List<String> header = List.of(lines.getFirst().split(";"));
         return lines.stream()
@@ -278,5 +345,4 @@ public class LocalDatabase {
         validateTableName(tableName);
         return Files.exists(getTablePath(tableName));
     }
-
 }

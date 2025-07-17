@@ -34,27 +34,71 @@ public class MainApp implements CommandLineRunner {
             if (!localDatabase.exists(Test.class)) {
                 localDatabase.create(Test.class);
             }
-
             localDatabase.delete(Test.class, test -> true);
 
-			List<Test> testList = new ArrayList<>();
-			for (int i = 1; i <= 10000; i++) {
-				Test test = new Test();
-				test.setId(i);
-				test.setNom("Nom " + i);
-				test.setNaissance(DateUtils.now());
-				test.setActive(i % 2 == 0);
-				testList.add(test);
-			}
+            // Insertion initiale
+            List<Test> testList = new ArrayList<>();
+            for (int i = 1; i <= 10000; i++) {
+                Test test = new Test();
+                test.setId(i);
+                test.setNom("Nom " + i);
+                test.setNaissance(DateUtils.now());
+                test.setActive(i % 2 == 0);
+                testList.add(test);
+            }
+            localDatabase.insert(testList);
 
-			localDatabase.insert(testList);
+            int threadCount = 8;
+            List<Thread> threads = new ArrayList<>();
+            long start = System.currentTimeMillis();
 
-            List<Test> tests = localDatabase.query(
-                    Test.class,
-                    test -> test.getId() % 2 == 0
-            );
-            log.info(tests.stream().map(test -> StringUtils.toString(test.getId())).collect(Collectors.joining(", ")));
-        } catch (IOException e) {
+            for (int t = 0; t < threadCount; t++) {
+                Thread thread = new Thread(() -> {
+                    try {
+                        // Query
+                        List<Test> evenTests = localDatabase.query(Test.class, test -> test.getId() % 2 == 0);
+                        Thread.sleep(10 + (int) (Math.random() * 91)); // Pause 10-100ms
+
+                        // Insert
+                        Test newTest = new Test();
+                        newTest.setId((int) (Math.random() * 100000) + 10001);
+                        newTest.setNom("Threaded");
+                        newTest.setNaissance(DateUtils.now());
+                        newTest.setActive(true);
+                        localDatabase.insert(newTest);
+                        Thread.sleep(10 + (int) (Math.random() * 91));
+
+                        // Update
+                        if (!evenTests.isEmpty()) {
+                            Test toUpdate = evenTests.getFirst();
+                            toUpdate.setNom("Updated by thread");
+                            localDatabase.update(toUpdate);
+                        }
+                        Thread.sleep(10 + (int) (Math.random() * 91));
+
+                        // Delete
+                        localDatabase.delete(Test.class, test -> test.getId() % 100 == 0);
+                    } catch (IOException | InterruptedException e) {
+                        log.error("Erreur dans le thread: " + e.getMessage());
+                        Thread.currentThread().interrupt();
+                    }
+                });
+                threads.add(thread);
+                thread.start();
+            }
+
+            for (Thread thread : threads) {
+                thread.join();
+            }
+
+            long end = System.currentTimeMillis();
+            log.info("Test concurrent terminé en " + (end - start) + " ms");
+
+            // Vérification finale
+            long count = localDatabase.query(Test.class, t -> true).size();
+            log.info("Nombre d'enregistrements finaux: " + count);
+
+        } catch (Exception e) {
             log.error(e.getMessage());
         }
     }
